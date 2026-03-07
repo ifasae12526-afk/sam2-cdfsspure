@@ -36,10 +36,9 @@ class DatasetChick(Dataset):
 
         all_ids = self._collect_ids(self.img_dir, self.msk_dir)
 
-        # First `shot` images are fixed support, rest are query
+        # First `shot` images are fixed support, ALL images are query
         self.support_ids = all_ids[:self.shot]
-        self.query_ids = all_ids[self.shot:]
-        self.episodes = self.query_ids
+        self.episodes = all_ids  # test all 18 images
 
     def __len__(self):
         return len(self.episodes)
@@ -95,9 +94,18 @@ class DatasetChick(Dataset):
         q_img = self._load_img(self.img_dir, q_stem)
         q_mask = self._load_mask(self.msk_dir, q_stem)
 
-        # Fixed support set (first `shot` images)
-        s_imgs = [self._load_img(self.img_dir, s) for s in self.support_ids]
-        s_masks = [self._load_mask(self.msk_dir, s) for s in self.support_ids]
+        # Fixed support set; exclude query if it's one of the support images
+        sup = [s for s in self.support_ids if s != q_stem]
+        if len(sup) < len(self.support_ids):
+            # query was a support image, borrow next available non-support image
+            all_ids = self.support_ids + [s for s in self.episodes if s not in self.support_ids]
+            for candidate in all_ids:
+                if candidate != q_stem and candidate not in sup:
+                    sup.append(candidate)
+                    break
+
+        s_imgs = [self._load_img(self.img_dir, s) for s in sup]
+        s_masks = [self._load_mask(self.msk_dir, s) for s in sup]
 
         q_img_t = self.transform(q_img)
 
