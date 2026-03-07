@@ -1,0 +1,10 @@
+hydra-core==1.3.2
+imageio
+pysodmetrics
+torch
+torchvision
+numpy
+Pillow
+tqdm
+tensorboard
+tensorboardX

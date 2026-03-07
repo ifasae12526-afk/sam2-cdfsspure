@@ -1,0 +1,17 @@
+# Dataset files
+dataset/
+
+# Training logs
+logs/
+
+# Model weights
+model/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Compiled extensions
+*.pyd
+*.so
