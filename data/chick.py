@@ -46,7 +46,9 @@ class DatasetChick(Dataset):
         if split == "trn":
             self.episodes = self.train_ids
         else:
-            self.episodes = self.test_ids
+            # Test on both test images AND train images (as query)
+            self.episodes = [('test', s) for s in self.test_ids] + \
+                            [('train', s) for s in self.train_ids]
 
     def __len__(self):
         if self.split == "trn" and self.episodes_per_epoch > 0:
@@ -176,17 +178,23 @@ class DatasetChick(Dataset):
                 s_masks.append(s_mask)
 
         else:
-            q_stem = self.episodes[idx]
+            source, q_stem = self.episodes[idx]
 
-            q_img = self._load_img(self.test_img_dir, q_stem)
-            q_mask = self._load_mask(self.test_msk_dir, q_stem)
-
-            pool = self.train_ids
+            if source == 'test':
+                q_img = self._load_img(self.test_img_dir, q_stem)
+                q_mask = self._load_mask(self.test_msk_dir, q_stem)
+                pool = self.train_ids
+            else:  # source == 'train'
+                q_img = self._load_img(self.train_img_dir, q_stem)
+                q_mask = self._load_mask(self.train_msk_dir, q_stem)
+                pool = [s for s in self.train_ids if s != q_stem]
 
             s_stems = random.sample(pool, min(self.shot, len(pool)))
 
-            s_imgs = [self._load_img(self.train_img_dir, s) for s in s_stems]
-            s_masks = [self._load_mask(self.train_msk_dir, s) for s in s_stems]
+            s_img_dir = self.train_img_dir
+            s_msk_dir = self.train_msk_dir
+            s_imgs = [self._load_img(s_img_dir, s) for s in s_stems]
+            s_masks = [self._load_mask(s_msk_dir, s) for s in s_stems]
 
         q_img_t = self.transform(q_img)
 
