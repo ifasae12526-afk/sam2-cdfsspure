@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-Test SAM2UNetCDFSSAggressive on CD-FSS benchmarks.
+Test SAM2UNetCDFSSAggressive — 1-way 5-shot evaluation on chick (CCTV) dataset.
+
+Workflow (default):
+  - Model di-train pada Pascal (pure), lalu di-test pada dataset chick.
+  - Support Set : 5 gambar (beserta mask) dari train split sebagai contoh
+                  visual objek (1-way 5-shot).
+  - Query Set   : Sisa gambar di test split sebagai data uji.
+  - Alasan 5-shot: gambar CCTV memiliki variasi pencahayaan/sudut pandang,
+    5 contoh membantu Cross-Attention menangkap ciri visual objek lebih stabil.
 
 Tambahan:
-  --tfi: Task-adaptive Fine-tuning Inference (TFI) untuk fine-tune anchor layers (PATM)
-         per-episode/task sebelum prediksi final.
+  --tfi: Task-adaptive Fine-tuning Inference (TFI) untuk fine-tune anchor layers
+         (PATM) per-episode/task sebelum prediksi final.
 
 Patch penting:
   - pred_mask aman untuk logits (B,1,H,W) atau (B,2,H,W)
@@ -241,12 +249,12 @@ def main() -> None:
     parser.add_argument(
         "--benchmark",
         type=str,
-        default="fss",
+        default="chick",
         choices=["pascal", "fss", "deepglobe", "isic", "lung", "chick"],
     )
     parser.add_argument("--split", type=str, default="test", choices=["val", "test"])
     parser.add_argument("--fold", type=int, default=0, choices=[0, 1, 2, 3, 4])
-    parser.add_argument("--nshot", type=int, default=1)
+    parser.add_argument("--nshot", type=int, default=5, help="Number of support shots (default 5 for 1-way 5-shot).")
     parser.add_argument("--img_size", type=int, default=512)
     parser.add_argument("--bsz", type=int, default=1)
     parser.add_argument("--nworker", type=int, default=0)

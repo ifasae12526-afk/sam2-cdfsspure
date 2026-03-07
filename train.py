@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Train SAM2UNetCDFSSAggressive — Pure Pascal training + 5-Shot Chick testing.
+Train SAM2UNetCDFSSAggressive — Pure Pascal training.
 
 Workflow:
-  1. Meta-train on PASCAL-5i (episodic few-shot segmentation)
-  2. After training, evaluate on chick dataset with 1-way 5-shot:
-     - Support Set : 5 images (with masks) as examples
-     - Query Set   : remaining images as test data
+  Meta-train on PASCAL-5i (episodic few-shot segmentation).
+  Setelah training selesai, gunakan test.py untuk evaluasi 1-way 5-shot
+  pada dataset chick (CCTV).
 
 Notes
 -----
@@ -250,7 +249,7 @@ def run_epoch(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser("SAM2UNet CD-FSS — Pure Pascal Training + 5-Shot Chick Testing")
+    parser = argparse.ArgumentParser("SAM2UNet CD-FSS — Pure Pascal Training")
 
     # Model / SAM2
     parser.add_argument("--sam2_cfg", type=str, default="sam2_hiera_l.yaml")
@@ -269,11 +268,6 @@ def main() -> None:
     parser.add_argument("--val_shot", type=int, default=1)
     parser.add_argument("--datapath_src", type=str, default="./dataset", help="Path to VOCdevkit (contains VOC2012/).")
     parser.add_argument("--datapath_tgt", type=str, default="./dataset", help="Path containing target datasets (chick/, FSS-1000/, etc.).")
-
-    # Post-training 5-shot test on chick
-    parser.add_argument("--test_benchmark", type=str, default="chick", choices=["pascal", "fss", "deepglobe", "isic", "lung", "chick"])
-    parser.add_argument("--test_shot", type=int, default=5, help="Number of support shots for post-training test (1-way K-shot).")
-    parser.add_argument("--test_split", type=str, default="test", choices=["val", "test"])
 
     # Optimization
     parser.add_argument("--bsz", type=int, default=2)
@@ -396,58 +390,8 @@ def main() -> None:
         if (epoch + 1) % 5 == 0:
             Logger.info(f"[time] elapsed {elapsed/3600:.2f}h | best val mIoU {best_val_miou:.2f}")
 
-    Logger.info("==================== Finished Training ====================")
-
-    # ══════════════════════════════════════════════════════════════════
-    # Post-training: 1-way 5-shot Test on Chick
-    #
-    # Support Set : 5 gambar (beserta mask) dari train split sebagai
-    #               contoh visual objek.
-    # Query Set   : Sisa gambar di test split sebagai data uji.
-    #
-    # Alasan 5-shot: gambar CCTV memiliki variasi pencahayaan/sudut
-    #   pandang — 5 contoh membantu Cross-Attention menangkap ciri
-    #   visual objek secara lebih stabil.
-    # ══════════════════════════════════════════════════════════════════
-    Logger.info(f"\n{'='*60}")
-    Logger.info(f"Post-training: 1-way {args.test_shot}-shot test on {args.test_benchmark}")
-    Logger.info(f"{'='*60}")
-
-    # Load best model checkpoint
-    best_ckpt = os.path.join(Logger.logpath, "best_model.pt")
-    if os.path.exists(best_ckpt):
-        state = torch.load(best_ckpt, map_location="cpu")
-        model.load_state_dict(state, strict=True)
-        Logger.info(f"Loaded best model from {best_ckpt}")
-    else:
-        Logger.info("No best_model.pt found, using final model weights for testing.")
-
-    # Build test dataloader for chick (1-way 5-shot)
-    datapath_test = args.datapath_src if args.test_benchmark == "pascal" else args.datapath_tgt
-    FSSDataset.initialize(img_size=args.img_size, datapath=datapath_test)
-    dataloader_test = FSSDataset.build_dataloader(
-        args.test_benchmark, 1, 0, 0, args.test_split, shot=args.test_shot
-    )
-    Logger.info(f"Test episodes (query images): {len(dataloader_test)}")
-
-    if len(dataloader_test) == 0:
-        Logger.info("WARNING: test dataloader is empty. Check datapath/benchmark/split.")
-    else:
-        torch.cuda.empty_cache()
-        with torch.no_grad():
-            test_loss, test_miou, test_fb_iou = run_epoch(
-                0, model, dataloader_test, optimizer=None,
-                training=False, amp=args.amp, scaler=None,
-                aux_weight=0.0, write_batch_idx=1,
-                grad_clip=0.0,
-                label=f"Test-{args.test_benchmark}-{args.test_shot}shot",
-            )
-
-        Logger.info(f"\n[1-way {args.test_shot}-shot on {args.test_benchmark}] "
-                    f"mIoU: {test_miou:.2f} | FB-IoU: {test_fb_iou:.2f}")
-
     Logger.tbd_writer.close()
-    Logger.info("==================== Finished ====================")
+    Logger.info("==================== Finished Training ====================")
 
 
 if __name__ == "__main__":
