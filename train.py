@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Train SAM2UNetCDFSSAggressive on episodic few-shot segmentation (CD-FSS style).
+Train SAM2UNetCDFSSAggressive — Pure Pascal training + 5-Shot Chick testing.
 
-Source-domain meta-train example:
-  - Train benchmark: pascal (VOC2012 + SegmentationClassAug)
-  - Val benchmark:   fss (FSS-1000) or deepglobe/isic/lung
+Workflow:
+  1. Meta-train on PASCAL-5i (episodic few-shot segmentation)
+  2. After training, evaluate on chick dataset with 1-way 5-shot:
+     - Support Set : 5 images (with masks) as examples
+     - Query Set   : remaining images as test data
 
 Notes
 -----
@@ -248,7 +250,7 @@ def run_epoch(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser("SAM2UNet CD-FSS (aggressive) training")
+    parser = argparse.ArgumentParser("SAM2UNet CD-FSS — Pure Pascal Training + 5-Shot Chick Testing")
 
     # Model / SAM2
     parser.add_argument("--sam2_cfg", type=str, default="sam2_hiera_l.yaml")
@@ -259,33 +261,33 @@ def main() -> None:
 
     # Data
     parser.add_argument("--img_size", type=int, default=512)
-    parser.add_argument("--benchmark_train", type=str, default="pascal", choices=["pascal", "fss", "deepglobe", "isic", "lung", "chick"])
-    parser.add_argument("--benchmark_val", type=str, default="fss", choices=["pascal", "fss", "deepglobe", "isic", "lung", "chick"])
-    parser.add_argument("--split_val", type=str, default="val", choices=["val", "test"])
-    parser.add_argument("--benchmark_train_aux", type=str, default="", choices=["", "pascal", "fss", "deepglobe", "isic", "lung", "chick"], help="Auxiliary training benchmark (mixed-domain). Empty = disabled.")
     parser.add_argument("--fold", type=int, default=4, choices=[0, 1, 2, 3, 4], help="PASCAL-5i fold. Use 4 to train on all 20 classes.")
     parser.add_argument("--val_fold", type=int, default=0, choices=[0, 1, 2, 3, 4])
+    parser.add_argument("--benchmark_val", type=str, default="pascal", choices=["pascal", "fss", "deepglobe", "isic", "lung", "chick"])
+    parser.add_argument("--split_val", type=str, default="val", choices=["val", "test"])
     parser.add_argument("--train_shot", type=int, default=1)
-    parser.add_argument("--aux_shot", type=int, default=5, help="Shot for auxiliary training benchmark")
     parser.add_argument("--val_shot", type=int, default=1)
-    parser.add_argument("--datapath_src", type=str, default="../VOCdevkit", help="Path to VOCdevkit (contains VOC2012/).")
-    parser.add_argument("--datapath_tgt", type=str, default="../CDFSL", help="Path containing target datasets (FSS-1000/, Deepglobe/, ISIC/, LungSegmentation/).")
+    parser.add_argument("--datapath_src", type=str, default="./dataset", help="Path to VOCdevkit (contains VOC2012/).")
+    parser.add_argument("--datapath_tgt", type=str, default="./dataset", help="Path containing target datasets (chick/, FSS-1000/, etc.).")
+
+    # Post-training 5-shot test on chick
+    parser.add_argument("--test_benchmark", type=str, default="chick", choices=["pascal", "fss", "deepglobe", "isic", "lung", "chick"])
+    parser.add_argument("--test_shot", type=int, default=5, help="Number of support shots for post-training test (1-way K-shot).")
+    parser.add_argument("--test_split", type=str, default="test", choices=["val", "test"])
 
     # Optimization
     parser.add_argument("--bsz", type=int, default=2)
-    parser.add_argument("--bsz_aux", type=int, default=0, help="Batch size for auxiliary training. 0 = same as --bsz.")
     parser.add_argument("--bsz_val", type=int, default=2)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--wd", type=float, default=5e-4)
     parser.add_argument("--niter", type=int, default=2000)
     parser.add_argument("--amp", action="store_true", help="Use torch.cuda.amp mixed precision")
-    parser.add_argument("--aux_weight", type=float, default=0.5, help="Deep supervision weight for branch-A/branch-B logits. Set 0 to disable (NOT recommended for small-fg datasets).")
+    parser.add_argument("--aux_weight", type=float, default=0.5, help="Deep supervision weight for branch-A/branch-B logits.")
     parser.add_argument("--grad_clip", type=float, default=0.5)
     parser.add_argument("--warmup_epochs", type=int, default=20, help="Linear warmup epochs")
     parser.add_argument("--cosine_T0", type=int, default=100, help="CosineAnnealingWarmRestarts T_0")
     parser.add_argument("--cosine_Tmult", type=int, default=2, help="CosineAnnealingWarmRestarts T_mult")
     parser.add_argument("--lr_min", type=float, default=1e-6, help="Minimum LR for cosine schedule")
-    parser.add_argument("--episodes_per_epoch", type=int, default=200, help="Virtual episodes per epoch for small datasets (chick)")
 
     # Runtime
     parser.add_argument("--nworker", type=int, default=4)
@@ -296,10 +298,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Logger init (PATNet style)
-    Logger.initialize(args, training=True)
+    # Fixed: training is always on Pascal
+    args.benchmark_train = "pascal"
 
-    # Evaluator init
+    # Logger init
+    Logger.initialize(args, training=True)
     Evaluator.initialize()
 
     # Build model
@@ -313,26 +316,15 @@ def main() -> None:
 
     scaler = GradScaler(enabled=args.amp)
 
-    # Build dataloaders
-    # ── Primary train dataset ──
-    datapath_train = args.datapath_src if args.benchmark_train == "pascal" else args.datapath_tgt
-    FSSDataset.initialize(img_size=args.img_size, datapath=datapath_train,
-                          episodes_per_epoch=args.episodes_per_epoch)
-    dataloader_trn = FSSDataset.build_dataloader(
-        args.benchmark_train, args.bsz, args.nworker, args.fold, "trn", shot=args.train_shot
-    )
+    # ══════════════════════════════════════════════════════════════════
+    # Build dataloaders — Pure Pascal training (NO mixed-domain)
+    # ══════════════════════════════════════════════════════════════════
 
-    # ── Auxiliary train dataset (mixed-domain) ──
-    dataloader_trn_aux = None
-    if args.benchmark_train_aux:
-        datapath_aux = args.datapath_src if args.benchmark_train_aux == "pascal" else args.datapath_tgt
-        FSSDataset.initialize(img_size=args.img_size, datapath=datapath_aux,
-                              episodes_per_epoch=args.episodes_per_epoch)
-        bsz_aux = args.bsz_aux if args.bsz_aux > 0 else args.bsz
-        dataloader_trn_aux = FSSDataset.build_dataloader(
-            args.benchmark_train_aux, bsz_aux, args.nworker, 0, "trn", shot=args.aux_shot
-        )
-        Logger.info(f"Mixed-domain: primary={args.benchmark_train} + aux={args.benchmark_train_aux}")
+    # ── Train dataset: Pascal only ──
+    FSSDataset.initialize(img_size=args.img_size, datapath=args.datapath_src)
+    dataloader_trn = FSSDataset.build_dataloader(
+        "pascal", args.bsz, args.nworker, args.fold, "trn", shot=args.train_shot
+    )
 
     # ── Val dataset ──
     datapath_val = args.datapath_src if args.benchmark_val == "pascal" else args.datapath_tgt
@@ -342,7 +334,6 @@ def main() -> None:
     )
 
     best_val_miou = float("-inf")
-    best_val_loss = float("inf")
     start_time = time.time()
 
     # LR Scheduler: cosine with warm restarts
@@ -350,6 +341,9 @@ def main() -> None:
                                             T_mult=args.cosine_Tmult,
                                             eta_min=args.lr_min)
 
+    # ══════════════════════════════════════════════════════════════════
+    # Training loop — Pure Pascal
+    # ══════════════════════════════════════════════════════════════════
     for epoch in range(args.niter):
         # Linear warmup
         if epoch < args.warmup_epochs:
@@ -357,31 +351,20 @@ def main() -> None:
             for pg in optimizer.param_groups:
                 pg['lr'] = warmup_lr
 
-        # ── Phase 1: Primary training (e.g. Pascal) ──
+        # ── Train on Pascal ──
         trn_loss, trn_miou, trn_fb_iou = run_epoch(
             epoch, model, dataloader_trn, optimizer,
             training=True, amp=args.amp, scaler=scaler,
             aux_weight=args.aux_weight, write_batch_idx=args.write_batch_idx,
             grad_clip=args.grad_clip,
-            label=f"Train-{args.benchmark_train}",
+            label="Train-pascal",
         )
-
-        # ── Phase 2: Auxiliary training (e.g. Chick) ──
-        if dataloader_trn_aux is not None:
-            torch.cuda.empty_cache()
-            aux_loss, aux_miou, aux_fb_iou = run_epoch(
-                epoch, model, dataloader_trn_aux, optimizer,
-                training=True, amp=args.amp, scaler=scaler,
-                aux_weight=args.aux_weight, write_batch_idx=args.write_batch_idx,
-                grad_clip=args.grad_clip,
-                label=f"Train-{args.benchmark_train_aux}",
-            )
 
         # Step scheduler after warmup
         if epoch >= args.warmup_epochs:
             scheduler.step()
 
-        # ── Phase 3: Validation ──
+        # ── Validation ──
         torch.cuda.empty_cache()
         with torch.no_grad():
             val_loss, val_miou, val_fb_iou = run_epoch(
@@ -407,17 +390,64 @@ def main() -> None:
         Logger.tbd_writer.add_scalars("loss", {"trn": trn_loss, "val": val_loss}, epoch)
         Logger.tbd_writer.add_scalars("miou", {"trn": trn_miou, "val": val_miou}, epoch)
         Logger.tbd_writer.add_scalars("fb_iou", {"trn": trn_fb_iou, "val": val_fb_iou}, epoch)
-        if dataloader_trn_aux is not None:
-            Logger.tbd_writer.add_scalars("loss_aux", {"trn_aux": aux_loss}, epoch)
-            Logger.tbd_writer.add_scalars("miou_aux", {"trn_aux": aux_miou}, epoch)
         Logger.tbd_writer.flush()
 
         elapsed = time.time() - start_time
         if (epoch + 1) % 5 == 0:
             Logger.info(f"[time] elapsed {elapsed/3600:.2f}h | best val mIoU {best_val_miou:.2f}")
 
-    Logger.tbd_writer.close()
     Logger.info("==================== Finished Training ====================")
+
+    # ══════════════════════════════════════════════════════════════════
+    # Post-training: 1-way 5-shot Test on Chick
+    #
+    # Support Set : 5 gambar (beserta mask) dari train split sebagai
+    #               contoh visual objek.
+    # Query Set   : Sisa gambar di test split sebagai data uji.
+    #
+    # Alasan 5-shot: gambar CCTV memiliki variasi pencahayaan/sudut
+    #   pandang — 5 contoh membantu Cross-Attention menangkap ciri
+    #   visual objek secara lebih stabil.
+    # ══════════════════════════════════════════════════════════════════
+    Logger.info(f"\n{'='*60}")
+    Logger.info(f"Post-training: 1-way {args.test_shot}-shot test on {args.test_benchmark}")
+    Logger.info(f"{'='*60}")
+
+    # Load best model checkpoint
+    best_ckpt = os.path.join(Logger.logpath, "best_model.pt")
+    if os.path.exists(best_ckpt):
+        state = torch.load(best_ckpt, map_location="cpu")
+        model.load_state_dict(state, strict=True)
+        Logger.info(f"Loaded best model from {best_ckpt}")
+    else:
+        Logger.info("No best_model.pt found, using final model weights for testing.")
+
+    # Build test dataloader for chick (1-way 5-shot)
+    datapath_test = args.datapath_src if args.test_benchmark == "pascal" else args.datapath_tgt
+    FSSDataset.initialize(img_size=args.img_size, datapath=datapath_test)
+    dataloader_test = FSSDataset.build_dataloader(
+        args.test_benchmark, 1, 0, 0, args.test_split, shot=args.test_shot
+    )
+    Logger.info(f"Test episodes (query images): {len(dataloader_test)}")
+
+    if len(dataloader_test) == 0:
+        Logger.info("WARNING: test dataloader is empty. Check datapath/benchmark/split.")
+    else:
+        torch.cuda.empty_cache()
+        with torch.no_grad():
+            test_loss, test_miou, test_fb_iou = run_epoch(
+                0, model, dataloader_test, optimizer=None,
+                training=False, amp=args.amp, scaler=None,
+                aux_weight=0.0, write_batch_idx=1,
+                grad_clip=0.0,
+                label=f"Test-{args.test_benchmark}-{args.test_shot}shot",
+            )
+
+        Logger.info(f"\n[1-way {args.test_shot}-shot on {args.test_benchmark}] "
+                    f"mIoU: {test_miou:.2f} | FB-IoU: {test_fb_iou:.2f}")
+
+    Logger.tbd_writer.close()
+    Logger.info("==================== Finished ====================")
 
 
 if __name__ == "__main__":
