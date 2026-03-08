@@ -254,7 +254,8 @@ def main() -> None:
     )
     parser.add_argument("--split", type=str, default="test", choices=["val", "test"])
     parser.add_argument("--fold", type=int, default=0, choices=[0, 1, 2, 3, 4])
-    parser.add_argument("--nshot", type=int, default=5, help="Number of support shots (default 5 for 1-way 5-shot).")
+    parser.add_argument("--nshot", type=int, default=5, choices=[1, 5],
+                        help="Number of support shots: 1 for 1-way 1-shot, 5 for 1-way 5-shot (default: 5).")
     parser.add_argument("--img_size", type=int, default=512)
     parser.add_argument("--bsz", type=int, default=1)
     parser.add_argument("--nworker", type=int, default=0)
@@ -326,6 +327,7 @@ def main() -> None:
     dataloader = FSSDataset.build_dataloader(
         args.benchmark, args.bsz, args.nworker, args.fold, args.split, shot=args.nshot
     )
+    Logger.info(f"Testing mode: 1-way {args.nshot}-shot")
     Logger.info(f"Num test episodes (batches): {len(dataloader)}")
     if len(dataloader) == 0:
         Logger.info("WARNING: dataloader is empty. Check datapath/benchmark/split/fold.")
