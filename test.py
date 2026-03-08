@@ -24,8 +24,10 @@ from __future__ import annotations
 import argparse
 from typing import Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
+from sklearn.metrics import average_precision_score
 
 from cdfss.sam2unet_cdfss_aggressive import SAM2CDFSSConfig, SAM2UNetCDFSSAggressive
 from cdfss.tfi import tfi_adapt_episode
@@ -69,6 +71,45 @@ def logits_to_pred_mask(logits: torch.Tensor, thr: float = 0.5,
             return logits.argmax(dim=1).long()
 
     return logits.argmax(dim=1).long()
+
+
+def logits_to_prob(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Convert raw logits to foreground probability map (B,H,W) in [0,1].
+    """
+    c = logits.shape[1]
+    if c == 1:
+        return logits.sigmoid().squeeze(1)
+    # c >= 2: softmax, take fg channel (class=1)
+    return torch.softmax(logits, dim=1)[:, 1]
+
+
+def compute_mae(prob: torch.Tensor, gt: torch.Tensor) -> float:
+    """
+    Mean Absolute Error antara probability map dan ground truth.
+    prob: (B,H,W) float [0,1]
+    gt:   (B,H,W) int {0,1}
+    """
+    return (prob - gt.float()).abs().mean().item()
+
+
+def compute_ap_per_image(prob: torch.Tensor, gt: torch.Tensor) -> float:
+    """
+    Average Precision (AP) per batch, rata-rata per image.
+    prob: (B,H,W) float [0,1]
+    gt:   (B,H,W) int {0,1}
+    Returns mean AP across images in the batch.
+    """
+    B = prob.shape[0]
+    aps = []
+    for i in range(B):
+        y_true = gt[i].cpu().numpy().ravel().astype(np.int32)
+        y_score = prob[i].cpu().numpy().ravel()
+        # AP undefined jika GT hanya satu kelas; skip
+        if y_true.sum() == 0 or y_true.sum() == y_true.size:
+            continue
+        aps.append(average_precision_score(y_true, y_score))
+    return float(np.mean(aps)) if aps else 0.0
 
 
 def _debug_first_episode(args: argparse.Namespace, batch: dict, logits: torch.Tensor, pred_mask: torch.Tensor) -> None:
@@ -126,10 +167,14 @@ def test_no_tfi(
     model: nn.Module,
     dataloader: torch.utils.data.DataLoader,
     args: argparse.Namespace,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float, float]:
     utils.fix_randseed(0)
     average_meter = AverageMeter(dataloader.dataset)
     model.eval()
+
+    mae_sum = 0.0
+    ap_sum = 0.0
+    n_episodes = 0
 
     for idx, batch in enumerate(dataloader):
         batch = utils.to_cuda(batch)
@@ -142,6 +187,15 @@ def test_no_tfi(
             fg_thr=args.fg_thr
         )
 
+        # Probability map for mAP / MAE
+        prob = logits_to_prob(logits)
+        gt = batch["query_mask"]
+        if gt.dim() == 2:
+            gt = gt.unsqueeze(0)
+        mae_sum += compute_mae(prob, gt)
+        ap_sum += compute_ap_per_image(prob, gt)
+        n_episodes += 1
+
         if args.debug_episode and idx == 0:
             _debug_first_episode(args, batch, logits, pred_mask)
 
@@ -151,19 +205,25 @@ def test_no_tfi(
 
     average_meter.write_result("Test", 0)
     miou, fb_iou = average_meter.compute_iou()
-    return float(miou), float(fb_iou)
+    mean_mae = mae_sum / max(n_episodes, 1)
+    mean_ap = ap_sum / max(n_episodes, 1)
+    return float(miou), float(fb_iou), mean_ap, mean_mae
 
 
 def test_with_tfi(
     model: nn.Module,
     dataloader: torch.utils.data.DataLoader,
     args: argparse.Namespace,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float, float]:
     utils.fix_randseed(0)
     average_meter = AverageMeter(dataloader.dataset)
     model.eval()
 
     m = _unwrap(model)
+
+    mae_sum = 0.0
+    ap_sum = 0.0
+    n_episodes = 0
 
     # Snapshot anchor weights (PATM) untuk reset tiap episode
     base_pat_state = {k: v.detach().clone() for k, v in m.pat.state_dict().items()}
@@ -173,6 +233,7 @@ def test_with_tfi(
 
         bsz = batch["query_img"].shape[0]
         pred_masks = []
+        prob_maps = []
 
         # TFI harus per-task; kalau bsz>1, loop per item
         for bi in range(bsz):
@@ -206,6 +267,7 @@ def test_with_tfi(
                     fg_thr=args.fg_thr
                 )
                 pred_masks.append(pred)
+                prob_maps.append(logits_to_prob(logits))
 
                 if args.debug_episode and idx == 0 and bi == 0:
                     # build a small batch dict for debug (use original batch where possible)
@@ -222,6 +284,14 @@ def test_with_tfi(
                     _debug_first_episode(args, dbg_batch, logits, pred)
 
         pred_mask = torch.cat(pred_masks, dim=0)  # (B,H,W)
+        prob = torch.cat(prob_maps, dim=0)         # (B,H,W)
+
+        gt = batch["query_mask"]
+        if gt.dim() == 2:
+            gt = gt.unsqueeze(0)
+        mae_sum += compute_mae(prob, gt)
+        ap_sum += compute_ap_per_image(prob, gt)
+        n_episodes += 1
 
         area_inter, area_union = Evaluator.classify_prediction(pred_mask.clone(), batch)
         average_meter.update(area_inter, area_union, batch["class_id"], loss=_dummy_loss(batch["query_img"].device))
@@ -229,7 +299,9 @@ def test_with_tfi(
 
     average_meter.write_result("Test (TFI)", 0)
     miou, fb_iou = average_meter.compute_iou()
-    return float(miou), float(fb_iou)
+    mean_mae = mae_sum / max(n_episodes, 1)
+    mean_ap = ap_sum / max(n_episodes, 1)
+    return float(miou), float(fb_iou), mean_ap, mean_mae
 
 
 def main() -> None:
@@ -334,11 +406,12 @@ def main() -> None:
         return
 
     if args.tfi:
-        miou, fb_iou = test_with_tfi(model, dataloader, args)
+        miou, fb_iou, mean_ap, mean_mae = test_with_tfi(model, dataloader, args)
     else:
-        miou, fb_iou = test_no_tfi(model, dataloader, args)
+        miou, fb_iou, mean_ap, mean_mae = test_no_tfi(model, dataloader, args)
 
     Logger.info("mIoU: %5.2f \t FB-IoU: %5.2f" % (miou, fb_iou))
+    Logger.info("mAP:  %5.4f \t MAE:   %5.4f" % (mean_ap, mean_mae))
     Logger.info("==================== Finished Testing ====================")
 
 

@@ -8,3 +8,4 @@ Pillow
 tqdm
 tensorboard
 tensorboardX
+scikit-learn
