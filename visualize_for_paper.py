@@ -2,9 +2,15 @@
 """
 Generate paper-quality visualizations for SAM2-UNet CD-FSS.
 
-Output per query image (saved to gambarforpaper/):
-  Row 1: (a) Query image | (b) Ground truth mask | (d) 1-shot prediction | (f) 5-shot prediction
-  Row 2: Support image(s) + Support mask(s)
+Each query creates a subfolder in gambarforpaper/ with individual images:
+  a_query_image.png         - (a) Query image
+  b_ground_truth.png        - (b) Ground truth mask
+  d_pred_1shot.png          - (d) SAM2 U-Net 1-shot prediction
+  f_pred_5shot.png          - (f) SAM2 U-Net 5-shot prediction
+  support_1shot_img_N.png   - 1-shot support image(s)
+  support_1shot_mask_N.png  - 1-shot support mask(s)
+  support_5shot_img_N.png   - 5-shot support image(s)
+  support_5shot_mask_N.png  - 5-shot support mask(s)
 
 Usage:
   python visualize_for_paper.py --load <checkpoint.pt> --sam2_ckpt <sam2_hiera_large.pt>
@@ -58,80 +64,18 @@ def predict(model: nn.Module, batch: dict) -> np.ndarray:
     return logits_to_pred(logits)
 
 
-def build_figure(
-    query_img: np.ndarray,
-    gt_mask: np.ndarray,
-    pred_1shot: np.ndarray,
-    pred_5shot: np.ndarray,
-    support_imgs_1shot: list[np.ndarray],
-    support_masks_1shot: list[np.ndarray],
-    support_imgs_5shot: list[np.ndarray],
-    support_masks_5shot: list[np.ndarray],
-) -> plt.Figure:
-    """Build a paper-quality figure with query, GT, 1-shot, 5-shot, and support."""
-
-    n_sup_1 = len(support_imgs_1shot)
-    n_sup_5 = len(support_imgs_5shot)
-    # Row 1: 4 panels (query, GT, 1-shot pred, 5-shot pred)
-    # Row 2: 1-shot support images + masks
-    # Row 3: 5-shot support images + masks
-    n_cols = max(4, n_sup_5 * 2)
-
-    fig, axes = plt.subplots(3, n_cols, figsize=(5 * n_cols, 5 * 3))
-
-    # Make sure axes is 2D
-    if axes.ndim == 1:
-        axes = axes.reshape(1, -1)
-
-    # Turn off all axes
-    for row in axes:
-        for ax in row:
-            ax.axis("off")
-
-    # --- Row 1: Query, GT, 1-shot pred, 5-shot pred ---
-    axes[0, 0].imshow(query_img, interpolation="lanczos")
-    axes[0, 0].set_title("(a) Query Image", fontsize=14, fontweight="bold")
-
-    axes[0, 1].imshow(gt_mask, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
-    axes[0, 1].set_title("(b) Ground Truth", fontsize=14, fontweight="bold")
-
-    axes[0, 2].imshow(pred_1shot, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
-    axes[0, 2].set_title("(d) 1-Shot Prediction", fontsize=14, fontweight="bold")
-
-    axes[0, 3].imshow(pred_5shot, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
-    axes[0, 3].set_title("(f) 5-Shot Prediction", fontsize=14, fontweight="bold")
-
-    # --- Row 2: 1-shot support images + masks ---
-    col = 0
-    for i in range(n_sup_1):
-        axes[1, col].imshow(support_imgs_1shot[i], interpolation="lanczos")
-        axes[1, col].set_title(f"Support Img {i+1}", fontsize=12)
-        col += 1
-        axes[1, col].imshow(support_masks_1shot[i], cmap="gray", vmin=0, vmax=1, interpolation="nearest")
-        axes[1, col].set_title(f"Support Mask {i+1}", fontsize=12)
-        col += 1
-    # Label for the row
-    axes[1, 0].set_ylabel("1-Shot Support", fontsize=10, fontweight="bold", rotation=90, labelpad=15)
-    axes[1, 0].axis("on")
-    axes[1, 0].set_xticks([])
-    axes[1, 0].set_yticks([])
-
-    # --- Row 3: 5-shot support images + masks ---
-    col = 0
-    for i in range(n_sup_5):
-        axes[2, col].imshow(support_imgs_5shot[i], interpolation="lanczos")
-        axes[2, col].set_title(f"Support Img {i+1}", fontsize=12)
-        col += 1
-        axes[2, col].imshow(support_masks_5shot[i], cmap="gray", vmin=0, vmax=1, interpolation="nearest")
-        axes[2, col].set_title(f"Support Mask {i+1}", fontsize=12)
-        col += 1
-    axes[2, 0].set_ylabel("5-Shot Support", fontsize=10, fontweight="bold", rotation=90, labelpad=15)
-    axes[2, 0].axis("on")
-    axes[2, 0].set_xticks([])
-    axes[2, 0].set_yticks([])
-
-    fig.tight_layout(pad=1.0)
-    return fig
+def save_single_image(img: np.ndarray, path: str, dpi: int, is_mask: bool = False) -> None:
+    """Save a single image/mask as a standalone high-res file (no axes, no borders)."""
+    h, w = img.shape[:2]
+    fig, ax = plt.subplots(1, 1, figsize=(w / 100, h / 100), dpi=dpi)
+    ax.axis("off")
+    if is_mask:
+        ax.imshow(img, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+    else:
+        ax.imshow(img, interpolation="lanczos")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -224,19 +168,30 @@ def main() -> None:
         sup_imgs_5 = [denormalize(s_imgs_5[k]) for k in range(s_imgs_5.shape[0])]
         sup_masks_5 = [s_masks_5[k].cpu().numpy().astype(np.uint8) for k in range(s_masks_5.shape[0])]
 
-        # --- Build and save figure ---
-        fig = build_figure(
-            query_img, gt_mask, pred_1, pred_5,
-            sup_imgs_1, sup_masks_1,
-            sup_imgs_5, sup_masks_5,
-        )
+        # --- Save each image individually into subfolder ---
+        query_dir = os.path.join(args.outdir, f"query_{idx:03d}")
+        os.makedirs(query_dir, exist_ok=True)
 
-        outpath_png = os.path.join(args.outdir, f"query_{idx:03d}.png")
-        outpath_pdf = os.path.join(args.outdir, f"query_{idx:03d}.pdf")
-        fig.savefig(outpath_png, dpi=args.dpi, bbox_inches="tight", pad_inches=0.1)
-        fig.savefig(outpath_pdf, dpi=args.dpi, bbox_inches="tight", pad_inches=0.1)
-        plt.close(fig)
-        print(f"[{idx+1}] Saved: {outpath_png} + {outpath_pdf}")
+        # (a) Query image
+        save_single_image(query_img, os.path.join(query_dir, "a_query_image.png"), args.dpi)
+        # (b) Ground truth mask
+        save_single_image(gt_mask, os.path.join(query_dir, "b_ground_truth.png"), args.dpi, is_mask=True)
+        # (d) 1-shot prediction
+        save_single_image(pred_1, os.path.join(query_dir, "d_pred_1shot.png"), args.dpi, is_mask=True)
+        # (f) 5-shot prediction
+        save_single_image(pred_5, os.path.join(query_dir, "f_pred_5shot.png"), args.dpi, is_mask=True)
+
+        # Support images & masks (1-shot)
+        for k, (simg, smsk) in enumerate(zip(sup_imgs_1, sup_masks_1)):
+            save_single_image(simg, os.path.join(query_dir, f"support_1shot_img_{k+1}.png"), args.dpi)
+            save_single_image(smsk, os.path.join(query_dir, f"support_1shot_mask_{k+1}.png"), args.dpi, is_mask=True)
+
+        # Support images & masks (5-shot)
+        for k, (simg, smsk) in enumerate(zip(sup_imgs_5, sup_masks_5)):
+            save_single_image(simg, os.path.join(query_dir, f"support_5shot_img_{k+1}.png"), args.dpi)
+            save_single_image(smsk, os.path.join(query_dir, f"support_5shot_mask_{k+1}.png"), args.dpi, is_mask=True)
+
+        print(f"[{idx+1}] Saved to: {query_dir}/")
         count += 1
 
     print(f"\n[DONE] {count} figures saved to '{args.outdir}/'")
